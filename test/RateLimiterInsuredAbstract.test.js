@@ -525,5 +525,353 @@ describe('RateLimiterInsuredAbstract - Backward Compatibility Tests', () => {
     expect(rejection.consumedPoints).to.equal(11);
     expect(rejection.msBeforeNext).to.equal(60000);
   });
-});
 
+  describe('fail-open / fail-closed contract', () => {
+    it('rejects with the store error by default (fail-closed) without insuranceLimiter', (done) => {
+      const rateLimiter = new TestRateLimiterStoreMemory({
+        points: 2,
+        duration: 1,
+      });
+      rateLimiter._upsert = () => Promise.reject(new Error('Store error'));
+
+      rateLimiter.consume('test-key')
+        .then(() => done(new Error('Should have rejected')))
+        .catch((err) => {
+          expect(err).to.be.instanceOf(Error);
+          expect(err).to.not.be.instanceOf(RateLimiterRes);
+          expect(err.message).to.equal('Store error');
+          done();
+        });
+    });
+
+    it('failOpen=true resolves consume with an unlimited result when no insuranceLimiter is set', async () => {
+      const rateLimiter = new TestRateLimiterStoreMemory({
+        points: 2,
+        duration: 1,
+        failOpen: true,
+      });
+      rateLimiter._upsert = () => Promise.reject(new Error('Store error'));
+
+      const res = await rateLimiter.consume('test-key');
+      expect(res).to.be.instanceOf(RateLimiterRes);
+      expect(res.remainingPoints).to.equal(Number.MAX_SAFE_INTEGER);
+      expect(res.consumedPoints).to.equal(0);
+    });
+
+    it('failOpen=true resolves get() with null and delete() with false', async () => {
+      const rateLimiter = new TestRateLimiterStoreMemory({
+        points: 2,
+        duration: 1,
+        failOpen: true,
+      });
+      rateLimiter._get = () => Promise.reject(new Error('Store error'));
+      rateLimiter._delete = () => Promise.reject(new Error('Store error'));
+
+      expect(await rateLimiter.get('test-key')).to.equal(null);
+      expect(await rateLimiter.delete('test-key')).to.equal(false);
+    });
+
+    it('failOpen=true never overrides an ordinary rate limit denial', (done) => {
+      const rateLimiter = new TestRateLimiterStoreMemory({
+        points: 1,
+        duration: 1,
+        failOpen: true,
+      });
+
+      rateLimiter.consume('test-key')
+        .then(() => rateLimiter.consume('test-key'))
+        .then(() => done(new Error('Should have rejected')))
+        .catch((err) => {
+          expect(err).to.be.instanceOf(RateLimiterRes);
+          expect(err.consumedPoints).to.be.greaterThan(rateLimiter.points);
+          done();
+        });
+    });
+
+    it('throws when failOpen is not a boolean', () => {
+      expect(() => new TestRateLimiterStoreMemory({
+        points: 1,
+        duration: 1,
+        failOpen: 'yes',
+      })).to.throw('failOpen must be a boolean');
+    });
+
+    it('failOpen can be changed at runtime', async () => {
+      const rateLimiter = new TestRateLimiterStoreMemory({
+        points: 2,
+        duration: 1,
+      });
+      rateLimiter._upsert = () => Promise.reject(new Error('Store error'));
+
+      try {
+        await rateLimiter.consume('test-key');
+      } catch (err) {
+        expect(err).to.be.instanceOf(Error);
+      }
+
+      rateLimiter.failOpen = true;
+      const res = await rateLimiter.consume('test-key');
+      expect(res).to.be.instanceOf(RateLimiterRes);
+      expect(res.remainingPoints).to.equal(Number.MAX_SAFE_INTEGER);
+    });
+  });
+
+  describe('cancellable failure state', () => {
+    it('marks the store as failed with the original error on a system error', (done) => {
+      const rateLimiter = new TestRateLimiterStoreMemory({
+        points: 2,
+        duration: 1,
+      });
+      rateLimiter._upsert = () => Promise.reject(new Error('Store error'));
+
+      rateLimiter.consume('test-key')
+        .catch(() => {
+          expect(rateLimiter.isStoreFailed()).to.equal(true);
+          expect(rateLimiter.getStoreFailureError()).to.be.instanceOf(Error);
+          expect(rateLimiter.getStoreFailureError().message).to.equal('Store error');
+          done();
+        });
+    });
+
+    it('never marks the store as failed on an ordinary RateLimiterRes rejection', (done) => {
+      const rateLimiter = new TestRateLimiterStoreMemory({
+        points: 1,
+        duration: 1,
+      });
+
+      rateLimiter.consume('test-key')
+        .then(() => rateLimiter.consume('test-key'))
+        .catch(() => {
+          expect(rateLimiter.isStoreFailed()).to.equal(false);
+          expect(rateLimiter.getStoreFailureError()).to.equal(null);
+          done();
+        });
+    });
+
+    it('clearStoreFailure() cancels the failure state manually', (done) => {
+      const rateLimiter = new TestRateLimiterStoreMemory({
+        points: 2,
+        duration: 1,
+      });
+      rateLimiter._upsert = () => Promise.reject(new Error('Store error'));
+
+      rateLimiter.consume('test-key')
+        .catch(() => {
+          expect(rateLimiter.isStoreFailed()).to.equal(true);
+          rateLimiter.clearStoreFailure();
+          expect(rateLimiter.isStoreFailed()).to.equal(false);
+          expect(rateLimiter.getStoreFailureError()).to.equal(null);
+          done();
+        });
+    });
+
+    it('cancels the failure state automatically after a successful consume', async () => {
+      const rateLimiter = new TestRateLimiterStoreMemory({
+        points: 2,
+        duration: 1,
+      });
+      rateLimiter._upsert = () => Promise.reject(new Error('Store error'));
+
+      try {
+        await rateLimiter.consume('test-key');
+      } catch (err) {
+        expect(err).to.be.instanceOf(Error);
+      }
+      expect(rateLimiter.isStoreFailed()).to.equal(true);
+
+      rateLimiter._upsert = TestRateLimiterStoreMemory.prototype._upsert;
+      await rateLimiter.consume('other-key');
+      expect(rateLimiter.isStoreFailed()).to.equal(false);
+    });
+
+    it('cancels the failure state automatically after a successful get()', async () => {
+      const rateLimiter = new TestRateLimiterStoreMemory({
+        points: 2,
+        duration: 1,
+      });
+      rateLimiter._get = () => Promise.reject(new Error('Store error'));
+
+      try {
+        await rateLimiter.get('test-key');
+      } catch (err) {
+        expect(err).to.be.instanceOf(Error);
+      }
+      expect(rateLimiter.isStoreFailed()).to.equal(true);
+
+      rateLimiter._get = TestRateLimiterStoreMemory.prototype._get;
+      await rateLimiter.get('test-key');
+      expect(rateLimiter.isStoreFailed()).to.equal(false);
+    });
+  });
+
+  describe('joint validation of operation params against insurance policy', () => {
+    it('rejects (fail-closed) when requested points exceed insuranceLimiter points', (done) => {
+      const insuranceLimiter = new RateLimiterMemory({
+        points: 3,
+        duration: 1,
+      });
+      const rateLimiter = new TestRateLimiterStoreMemory({
+        points: 10,
+        duration: 1,
+        insuranceLimiter,
+      });
+      rateLimiter._upsert = () => Promise.reject(new Error('Store error'));
+
+      rateLimiter.consume('test-key', 5)
+        .then(() => done(new Error('Should have rejected')))
+        .catch((err) => {
+          expect(err).to.be.instanceOf(Error);
+          expect(err.message).to.contain('exceeds insuranceLimiter');
+          done();
+        });
+    });
+
+    it('fail-open applies when params cannot be served by the insurance policy', async () => {
+      const insuranceLimiter = new RateLimiterMemory({
+        points: 3,
+        duration: 1,
+      });
+      const rateLimiter = new TestRateLimiterStoreMemory({
+        points: 10,
+        duration: 1,
+        insuranceLimiter,
+        failOpen: true,
+      });
+      rateLimiter._upsert = () => Promise.reject(new Error('Store error'));
+
+      const res = await rateLimiter.consume('test-key', 5);
+      expect(res).to.be.instanceOf(RateLimiterRes);
+      expect(res.remainingPoints).to.equal(Number.MAX_SAFE_INTEGER);
+    });
+
+    it('does not reject when requested points fit the insurance policy', async () => {
+      const insuranceLimiter = new RateLimiterMemory({
+        points: 5,
+        duration: 1,
+      });
+      const rateLimiter = new TestRateLimiterStoreMemory({
+        points: 10,
+        duration: 1,
+        insuranceLimiter,
+      });
+      rateLimiter._upsert = () => Promise.reject(new Error('Store error'));
+
+      const res = await rateLimiter.consume('test-key', 5);
+      expect(res).to.be.instanceOf(RateLimiterRes);
+      expect(res.consumedPoints).to.equal(5);
+    });
+
+    it('fail-closed when insuranceLimiter does not implement the requested method', (done) => {
+      const insuranceLimiter = new RateLimiterMemory({
+        points: 5,
+        duration: 1,
+      });
+      insuranceLimiter.block = undefined;
+      const rateLimiter = new TestRateLimiterStoreMemory({
+        points: 2,
+        duration: 1,
+        insuranceLimiter,
+      });
+      rateLimiter._upsert = () => Promise.reject(new Error('Store error'));
+
+      rateLimiter.block('test-key', 5)
+        .then(() => done(new Error('Should have rejected')))
+        .catch((err) => {
+          expect(err).to.be.instanceOf(Error);
+          expect(err.message).to.contain('does not implement block');
+          done();
+        });
+    });
+  });
+
+  describe('insurance limiter failure handling', () => {
+    it('keeps an ordinary insurance denial as a RateLimiterRes rejection even with failOpen', (done) => {
+      const insuranceLimiter = new RateLimiterMemory({
+        points: 1,
+        duration: 1,
+      });
+      const rateLimiter = new TestRateLimiterStoreMemory({
+        points: 10,
+        duration: 1,
+        insuranceLimiter,
+        failOpen: true,
+      });
+      rateLimiter._upsert = () => Promise.reject(new Error('Store error'));
+
+      rateLimiter.consume('test-key')
+        .then(() => rateLimiter.consume('test-key'))
+        .then(() => done(new Error('Should have rejected')))
+        .catch((err) => {
+          expect(err).to.be.instanceOf(RateLimiterRes);
+          done();
+        });
+    });
+
+    it('fail-closed with the insurance system error when both layers fail', (done) => {
+      const insuranceLimiter = new RateLimiterMemory({
+        points: 5,
+        duration: 1,
+      });
+      insuranceLimiter.consume = () => Promise.reject(new Error('Insurance boom'));
+      const rateLimiter = new TestRateLimiterStoreMemory({
+        points: 2,
+        duration: 1,
+        insuranceLimiter,
+      });
+      rateLimiter._upsert = () => Promise.reject(new Error('Store error'));
+
+      rateLimiter.consume('test-key')
+        .then(() => done(new Error('Should have rejected')))
+        .catch((err) => {
+          expect(err).to.be.instanceOf(Error);
+          expect(err.message).to.equal('Insurance boom');
+          done();
+        });
+    });
+
+    it('fail-open when both the store and the insurance limiter fail with system errors', async () => {
+      const insuranceLimiter = new RateLimiterMemory({
+        points: 5,
+        duration: 1,
+      });
+      insuranceLimiter.consume = () => Promise.reject(new Error('Insurance boom'));
+      const rateLimiter = new TestRateLimiterStoreMemory({
+        points: 2,
+        duration: 1,
+        insuranceLimiter,
+        failOpen: true,
+      });
+      rateLimiter._upsert = () => Promise.reject(new Error('Store error'));
+
+      const res = await rateLimiter.consume('test-key');
+      expect(res).to.be.instanceOf(RateLimiterRes);
+      expect(res.remainingPoints).to.equal(Number.MAX_SAFE_INTEGER);
+    });
+  });
+
+  describe('healthy main store path', () => {
+    it('never invokes the insuranceLimiter and keeps no failure state', async () => {
+      const insuranceLimiter = new RateLimiterMemory({
+        points: 5,
+        duration: 1,
+      });
+      let insuranceCalls = 0;
+      const originalConsume = insuranceLimiter.consume;
+      insuranceLimiter.consume = (...args) => {
+        insuranceCalls += 1;
+        return originalConsume.apply(insuranceLimiter, args);
+      };
+
+      const rateLimiter = new TestRateLimiterStoreMemory({
+        points: 5,
+        duration: 1,
+        insuranceLimiter,
+      });
+
+      const res = await rateLimiter.consume('test-key');
+      expect(res).to.be.instanceOf(RateLimiterRes);
+      expect(insuranceCalls).to.equal(0);
+      expect(rateLimiter.isStoreFailed()).to.equal(false);
+    });
+  });
+});

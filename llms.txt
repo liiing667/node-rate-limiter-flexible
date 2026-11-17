@@ -19,6 +19,8 @@
 - `blockOnConsumed`: store limiters only; block for `blockDuration` once this many points are consumed instead of right after `points`
 - `inMemoryBlockOnConsumed`: block in process memory for DoS protection (~7x faster)
 - `insuranceLimiter`: fallback limiter when store is down
+- `failOpen`: fail-open contract for store/insurance system errors (default `false` = fail-closed rejection). When `true`, failed operations resolve with an unlimited result; rate-limit denials are never affected
+- Failure state: `isStoreFailed()`, `getStoreFailureError()`, `markStoreFailed(err)`, `clearStoreFailure()`; cleared automatically after any successful main-store operation
 - Keys can be IP, user ID, auth token, API route, or any string
 - `RateLimiterRes` object: `msBeforeNext`, `remainingPoints`, `consumedPoints`, `isFirstInDuration`
 

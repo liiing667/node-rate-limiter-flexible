@@ -2,6 +2,69 @@ const { describe, it } = require('mocha');
 const { expect } = require('chai');
 const RLWrapperBlackAndWhite = require('../lib/RLWrapperBlackAndWhite');
 const RateLimiterMemory = require('../lib/RateLimiterMemory');
+const RateLimiterRes = require('../lib/RateLimiterRes');
+const RateLimiterStoreAbstract = require('../lib/RateLimiterStoreAbstract');
+
+class TestStoreLimiter extends RateLimiterStoreAbstract {
+  constructor(opts) {
+    super(opts);
+    this._data = {};
+  }
+
+  _getRateLimiterRes(rlKey, changedPoints, storeResult) {
+    const res = new RateLimiterRes();
+    res.consumedPoints = storeResult.points;
+    res.isFirstInDuration = res.consumedPoints === changedPoints;
+    res.remainingPoints = Math.max(this.points - res.consumedPoints, 0);
+    res.msBeforeNext = storeResult.msBeforeNext;
+    return res;
+  }
+
+  _get(rlKey) {
+    return Promise.resolve(this._data[rlKey] === undefined ? null : this._data[rlKey]);
+  }
+
+  _delete(rlKey) {
+    if (this._data[rlKey] === undefined) {
+      return Promise.resolve(false);
+    }
+    delete this._data[rlKey];
+    return Promise.resolve(true);
+  }
+
+  _upsert(rlKey, points, msDuration) {
+    const now = Date.now();
+    const result = { points, msBeforeNext: msDuration };
+    if (this._data[rlKey] === undefined) {
+      this._data[rlKey] = { points, expired: now + msDuration };
+    } else {
+      const value = this._data[rlKey];
+      if (value.expired > now) {
+        value.points += points;
+        result.points = value.points;
+        result.msBeforeNext = value.expired - now;
+      } else {
+        value.points = points;
+        value.expired = now + msDuration;
+      }
+    }
+    return Promise.resolve(result);
+  }
+}
+
+class FailingStoreLimiter extends TestStoreLimiter {
+  constructor(opts) {
+    super(opts);
+    this._failing = true;
+  }
+
+  _upsert(rlKey, points, msDuration, forceExpire, options) {
+    if (this._failing) {
+      return Promise.reject(new Error('Store error'));
+    }
+    return super._upsert(rlKey, points, msDuration, forceExpire, options);
+  }
+}
 
 describe('RLWrapperBlackAndWhite ', () => {
   it('consume if not blacked', (done) => {
@@ -812,6 +875,80 @@ describe('RLWrapperBlackAndWhite ', () => {
           done();
         })
         .catch((err) => done(err));
+    });
+  });
+
+  describe('insurance fail-open / fail-closed contract', () => {
+    it('falls back through the wrapped insurance limiter and records the store failure', (done) => {
+      const innerLimiter = new RateLimiterMemory({ points: 5, duration: 1 });
+      const wrapper = new RLWrapperBlackAndWhite({ limiter: innerLimiter });
+      const rateLimiter = new FailingStoreLimiter({
+        points: 2,
+        duration: 1,
+        insuranceLimiter: wrapper,
+      });
+
+      rateLimiter.consume('test-key')
+        .then((res) => {
+          expect(res.remainingPoints).to.equal(4);
+          expect(rateLimiter.isStoreFailed()).to.equal(true);
+          done();
+        })
+        .catch((err) => done(err));
+    });
+
+    it('fail-open resolves with an unlimited result when the wrapped insurance also fails', async () => {
+      const innerLimiter = new RateLimiterMemory({ points: 5, duration: 1 });
+      innerLimiter.consume = () => Promise.reject(new Error('Insurance boom'));
+      const wrapper = new RLWrapperBlackAndWhite({ limiter: innerLimiter });
+      const rateLimiter = new FailingStoreLimiter({
+        points: 2,
+        duration: 1,
+        insuranceLimiter: wrapper,
+        failOpen: true,
+      });
+
+      const res = await rateLimiter.consume('test-key');
+      expect(res).to.be.instanceOf(RateLimiterRes);
+      expect(res.remainingPoints).to.equal(Number.MAX_SAFE_INTEGER);
+    });
+
+    it('a black-list denial from the wrapped insurance stays a denial even with failOpen', (done) => {
+      const innerLimiter = new RateLimiterMemory({ points: 5, duration: 1 });
+      const wrapper = new RLWrapperBlackAndWhite({
+        limiter: innerLimiter,
+        blackList: ['blocked-key'],
+      });
+      const rateLimiter = new FailingStoreLimiter({
+        points: 2,
+        duration: 1,
+        insuranceLimiter: wrapper,
+        failOpen: true,
+      });
+
+      rateLimiter.consume('blocked-key')
+        .then(() => done(new Error('Should have rejected')))
+        .catch((err) => {
+          expect(err).to.be.instanceOf(RateLimiterRes);
+          done();
+        });
+    });
+
+    it('cancels the failure state once the main store recovers', async () => {
+      const innerLimiter = new RateLimiterMemory({ points: 5, duration: 1 });
+      const wrapper = new RLWrapperBlackAndWhite({ limiter: innerLimiter });
+      const rateLimiter = new FailingStoreLimiter({
+        points: 2,
+        duration: 1,
+        insuranceLimiter: wrapper,
+      });
+
+      await rateLimiter.consume('test-key');
+      expect(rateLimiter.isStoreFailed()).to.equal(true);
+
+      rateLimiter._failing = false;
+      await rateLimiter.consume('test-key');
+      expect(rateLimiter.isStoreFailed()).to.equal(false);
     });
   });
 });

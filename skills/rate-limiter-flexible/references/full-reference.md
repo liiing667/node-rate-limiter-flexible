@@ -67,6 +67,7 @@ Options can be changed at runtime: `rateLimiter.points = 50`, `rateLimiter.durat
 | `inMemoryBlockOnConsumed` | `0` | Block key in process memory after this many points consumed (DoS protection). Should be >= `points`. |
 | `inMemoryBlockDuration` | `0` | Seconds to block in memory. Set same as `blockDuration` for consistency across processes. |
 | `insuranceLimiter` | `undefined` | Fallback limiter instance used when store errors occur. |
+| `failOpen` | `false` | Resolve with an unlimited result on store/insurance system errors instead of rejecting. Denials unaffected. |
 | `execEvenly` | `false` | Delay actions evenly over duration (Leaky Bucket pattern). |
 | `execEvenlyMinDelayMs` | `duration * 1000 / points` | Minimum delay when `execEvenly` is true. |
 | `clearExpiredByTimeout` | `true` | (MySQL, SQLite, PostgreSQL) Auto-delete expired data every 5 min. |
@@ -421,6 +422,13 @@ const rateLimiter = new RateLimiterRedis({
 ```
 
 Note: insurance limiter automatically inherits `blockDuration` and `execEvenly` from parent, but not `blockOnConsumed`. Data is NOT copied between limiters when main store recovers.
+
+Fail-open / fail-closed contract and cancellable failure state:
+
+- `failOpen: true` makes system errors resolve with an unlimited result instead of rejecting (default `false` = fail-closed with the original `Error`). Denials (`RateLimiterRes`) are never affected.
+- Fallback parameters are validated against the insurance policy first; requests exceeding its points (or missing methods) follow the fail-open/fail-closed policy rather than silently bypassing the backup limit.
+- Failure state API: `isStoreFailed()`, `getStoreFailureError()`, `markStoreFailed(err)`, `clearStoreFailure()`. Only system errors mark the store as failed, and any successful main-store operation clears it automatically.
+- A healthy main store never invokes the insurance limiter, so the normal path has no extra consumption.
 
 ### In-Memory Block Strategy (DoS mitigation)
 

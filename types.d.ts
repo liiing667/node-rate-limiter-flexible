@@ -255,6 +255,36 @@ export class RateLimiterAbstract {
 
 export class RateLimiterInsuredAbstract extends RateLimiterAbstract {
     constructor(opts: IRateLimiterOptions);
+
+    /**
+     * When true, system errors from the store and insurance limiter fail open instead
+     * of rejecting with the error. Defaults to false (fail-closed).
+     */
+    failOpen: boolean;
+
+    insuranceLimiter?: RateLimiterLike;
+
+    /**
+     * True while the main store is marked as failed after a system error.
+     * Rate limit denials never mark the store as failed.
+     */
+    isStoreFailed(): boolean;
+
+    /**
+     * The last recorded main store error, or null when the store is healthy.
+     */
+    getStoreFailureError(): Error | null;
+
+    /**
+     * Mark the main store as failed and remember the error.
+     */
+    markStoreFailed(err: Error): void;
+
+    /**
+     * Cancel the failure state. It is also cleared automatically after every
+     * successful main store operation.
+     */
+    clearStoreFailure(): void;
 }
 
 export class RateLimiterStoreAbstract extends RateLimiterInsuredAbstract {
@@ -280,6 +310,13 @@ interface IRateLimiterOptions {
     execEvenlyMinDelayMs?: number;
     blockDuration?: number;
     insuranceLimiter?: RateLimiterLike;
+    /**
+     * Fail-open contract used when the main store (and the insuranceLimiter, if set)
+     * fails with a system error. Defaults to false (fail-closed: reject with the error).
+     * When true, failed operations resolve with an unlimited result instead of rejecting.
+     * Ordinary rate limit denials (RateLimiterRes) are never affected.
+     */
+    failOpen?: boolean;
 }
 
 interface IRateLimiterClusterOptions extends IRateLimiterOptions {

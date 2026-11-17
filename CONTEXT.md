@@ -54,6 +54,7 @@ Options can be changed at runtime: `rateLimiter.points = 50`, `rateLimiter.durat
 | `inMemoryBlockOnConsumed` | `0` | Block key in process memory after this many points consumed (DoS protection). Should be >= `points`. |
 | `inMemoryBlockDuration` | `0` | Seconds to block in memory. Set same as `blockDuration` for consistency across processes. |
 | `insuranceLimiter` | `undefined` | Fallback limiter instance used when store errors occur. |
+| `failOpen` | `false` | When the store (and insurance limiter, if set) fails with a system error, resolve with an unlimited result instead of rejecting. Denials are unaffected. |
 | `execEvenly` | `false` | Delay actions evenly over duration (Leaky Bucket pattern). |
 | `execEvenlyMinDelayMs` | `duration * 1000 / points` | Minimum delay when `execEvenly` is true. |
 | `clearExpiredByTimeout` | `true` | (MySQL, SQLite, PostgreSQL) Auto-delete expired data every 5 min. |
@@ -345,6 +346,16 @@ const rateLimiter = new RateLimiterRedis({
 ```
 
 Note: insurance limiter automatically inherits `blockDuration` and `execEvenly` from parent, but not `blockOnConsumed`. Data is NOT copied between limiters when main store recovers.
+
+#### Fail-open / fail-closed contract and failure state
+
+Store limiters expose an explicit failure contract for system errors:
+
+- `failOpen` option (default `false`): with `false` (fail-closed), a system error rejects with the original `Error` once no working layer can serve the request; with `true` (fail-open), failed operations resolve instead — unlimited `RateLimiterRes` for `consume`/`penalty`/`reward`/`set`/`block`, `null` for `get()`, `false` for `delete()`. Ordinary rate-limit denials (`RateLimiterRes`) always pass through unchanged, even in fail-open mode.
+- Operation parameters are validated against the insurance policy before delegation: requesting more points than the insurance limiter allows (or calling a method the insurance limiter does not implement) applies the fail-open/fail-closed policy instead of silently exceeding the backup quota.
+- A rejection coming from the insurance limiter itself is distinguished: `RateLimiterRes` stays a normal denial, only a system `Error` triggers the failure policy, so denials are never mistaken for outages.
+- Cancellable failure state: `isStoreFailed()`, `getStoreFailureError()`, `markStoreFailed(err)`, and `clearStoreFailure()`. The state marks only system errors (never denials) and is cleared automatically after every successful main-store operation, or manually when the store recovers.
+- The healthy main-store path never touches the insurance limiter and adds no extra consumption.
 
 ### In-Memory Block Strategy (DoS mitigation)
 
