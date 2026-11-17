@@ -181,11 +181,100 @@ describe('RateLimiterAbstract', function () {
       expect(rateLimiter.parseKey(rlKey)).to.equal('test-key');
     });
 
-    it('handles key with colon in the middle', () => {
+    it('encodes key with colon behind a b64 marker and parses it back', () => {
       const rateLimiter = new RateLimiterAbstract({ points: 4, duration: 1 });
       const rlKey = rateLimiter.getKey('user:123:action');
-      expect(rlKey).to.equal('rlflx:user:123:action');
+      expect(rlKey).to.equal(`rlflx:b64:${Buffer.from('user:123:action', 'utf8').toString('base64')}`);
       expect(rateLimiter.parseKey(rlKey)).to.equal('user:123:action');
+    });
+
+    it('encodes key with colon when keyPrefix is empty and parses it back', () => {
+      const rateLimiter = new RateLimiterAbstract({ keyPrefix: '', points: 4, duration: 1 });
+      const rlKey = rateLimiter.getKey('tenant:user');
+      expect(rlKey).to.equal(`b64:${Buffer.from('tenant:user', 'utf8').toString('base64')}`);
+      expect(rateLimiter.parseKey(rlKey)).to.equal('tenant:user');
+    });
+
+    it('round-trips arbitrary keys, including colons and unicode', () => {
+      const rateLimiter = new RateLimiterAbstract({ keyPrefix: 'custom', points: 4, duration: 1 });
+      ['plain', 'a:b', 'a:b:c:', ':', '日本語:キー'].forEach((key) => {
+        expect(rateLimiter.parseKey(rateLimiter.getKey(key))).to.equal(key);
+      });
+    });
+
+    it('keeps plain keys collision-free against encoded keys', () => {
+      const rateLimiter = new RateLimiterAbstract({ keyPrefix: 'p', points: 4, duration: 1 });
+      const colonKey = 'a:b';
+      const encoded = rateLimiter.getKey(colonKey);
+      // A plain key that literally resembles the encoded layout stays plain,
+      // because the raw key contains no ':' of its own.
+      const plainLookalike = encoded.substring('p:'.length);
+      expect(rateLimiter.getKey(plainLookalike)).to.not.equal(encoded);
+      expect(rateLimiter.parseKey(rateLimiter.getKey(plainLookalike))).to.equal(plainLookalike);
+    });
+
+    it('keeps two prefixes collision-free when keys contain separators', () => {
+      const limiterA = new RateLimiterAbstract({ keyPrefix: 'a', points: 4, duration: 1 });
+      const limiterB = new RateLimiterAbstract({ keyPrefix: 'b', points: 4, duration: 1 });
+      expect(limiterA.getKey('x:y')).to.not.equal(limiterB.getKey('x:y'));
+      // Cross-decoding must never yield a valid key of the other limiter.
+      expect(limiterA.getKey('b:x')).to.not.equal(limiterB.getKey('x'));
+    });
+
+    it('parses legacy plain storage keys, including keys containing colons', () => {
+      const rateLimiter = new RateLimiterAbstract({ points: 4, duration: 1 });
+      const legacyKey = 'rlflx:legacy:tenant:user';
+      expect(rateLimiter.parseKey(legacyKey)).to.equal('legacy:tenant:user');
+    });
+
+    it('parses correctly when a legacy keyPrefix itself contains a colon', () => {
+      const rateLimiter = new RateLimiterAbstract({ points: 4, duration: 1 });
+      rateLimiter._keyPrefix = 'legacy:prefix';
+      const legacyStorageKey = 'legacy:prefix:tenant:user';
+      expect(rateLimiter.parseKey(legacyStorageKey)).to.equal('tenant:user');
+    });
+  });
+
+  describe('key validation', () => {
+    it('throws on empty string key', () => {
+      const rateLimiter = new RateLimiterAbstract({ points: 4, duration: 1 });
+      expect(() => rateLimiter.getKey('')).to.throw('key must be a non-empty string or number');
+    });
+
+    it('throws on null and undefined keys', () => {
+      const rateLimiter = new RateLimiterAbstract({ points: 4, duration: 1 });
+      expect(() => rateLimiter.getKey(null)).to.throw();
+      expect(() => rateLimiter.getKey(undefined)).to.throw();
+    });
+
+    it('accepts finite numeric keys', () => {
+      const rateLimiter = new RateLimiterAbstract({ points: 4, duration: 1 });
+      expect(rateLimiter.getKey(123)).to.equal('rlflx:123');
+      expect(rateLimiter.parseKey(rateLimiter.getKey(123))).to.equal('123');
+    });
+
+    it('rejects non-finite numeric keys', () => {
+      const rateLimiter = new RateLimiterAbstract({ points: 4, duration: 1 });
+      expect(() => rateLimiter.getKey(NaN)).to.throw();
+      expect(() => rateLimiter.getKey(Infinity)).to.throw();
+    });
+
+    it('throws when key exceeds MAX_KEY_LENGTH', () => {
+      const rateLimiter = new RateLimiterAbstract({ points: 4, duration: 1 });
+      const longKey = 'a'.repeat(rateLimiter.MAX_KEY_LENGTH + 1);
+      expect(() => rateLimiter.getKey(longKey))
+        .to.throw(`key length must not exceed ${rateLimiter.MAX_KEY_LENGTH} characters`);
+    });
+
+    it('accepts a key exactly at MAX_KEY_LENGTH', () => {
+      const rateLimiter = new RateLimiterAbstract({ points: 4, duration: 1 });
+      const maxKey = 'a'.repeat(rateLimiter.MAX_KEY_LENGTH);
+      expect(() => rateLimiter.getKey(maxKey)).to.not.throw();
+    });
+
+    it('rejects a keyPrefix containing the colon delimiter', () => {
+      expect(() => new RateLimiterAbstract({ keyPrefix: 'a:b', points: 4, duration: 1 }))
+        .to.throw('keyPrefix must not contain ":" character');
     });
   });
 });

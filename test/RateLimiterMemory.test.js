@@ -517,4 +517,72 @@ describe('RateLimiterMemory with fixed window', function RateLimiterMemoryTest()
         done(err);
       });
   });
+
+  describe('quota key namespace', () => {
+    it('does not collide when a key embeds the prefix separator', async () => {
+      const limiterA = new RateLimiterMemory({ keyPrefix: 'a', points: 10, duration: 5 });
+      const limiterB = new RateLimiterMemory({ keyPrefix: 'b', points: 10, duration: 5 });
+
+      // Naive prefix concatenation would map both pairs to the same string.
+      expect(limiterA.getKey('b:victim')).to.not.equal(limiterB.getKey('victim'));
+
+      await limiterA.consume('b:victim', 3);
+      const untouched = await limiterB.get('victim');
+      expect(untouched).to.equal(null);
+
+      const attacker = await limiterA.get('b:victim');
+      expect(attacker.consumedPoints).to.equal(3);
+    });
+
+    it('round-trips keys containing colons through getKey/parseKey and dump', async () => {
+      const rateLimiterMemory = new RateLimiterMemory({ points: 5, duration: 5 });
+      const testKey = 'tenant:42:user:7';
+      await rateLimiterMemory.consume(testKey);
+
+      const dump = rateLimiterMemory.dump();
+      expect(dump.storage).to.have.lengthOf(1);
+      expect(dump.storage[0].key).to.equal(testKey);
+
+      const restored = new RateLimiterMemory({ points: 5, duration: 5 });
+      restored.restore(dump);
+      const res = await restored.get(testKey);
+      expect(res.consumedPoints).to.equal(1);
+    });
+
+    it('exposes legacy plain-prefix storage keys through parseKey and dump', async () => {
+      const rateLimiterMemory = new RateLimiterMemory({ points: 5, duration: 5 });
+      const legacyStorageKey = 'rlflx:legacy:tenant:user';
+      rateLimiterMemory._memoryStorage._restoreRecord(legacyStorageKey, 2, Date.now() + 5000);
+
+      expect(rateLimiterMemory.parseKey(legacyStorageKey)).to.equal('legacy:tenant:user');
+
+      const dump = rateLimiterMemory.dump();
+      expect(dump.storage[0].key).to.equal('legacy:tenant:user');
+
+      // Re-importing the dump migrates the legacy record to the encoded layout.
+      const migrated = new RateLimiterMemory({ points: 5, duration: 5 });
+      migrated.restore(dump);
+      const res = await migrated.get('legacy:tenant:user');
+      expect(res.consumedPoints).to.equal(2);
+    });
+
+    it('rejects empty keys with an explicit error', async () => {
+      const rateLimiterMemory = new RateLimiterMemory({ points: 5, duration: 5 });
+      let error;
+      try {
+        await rateLimiterMemory.consume('');
+      } catch (err) {
+        error = err;
+      }
+      expect(error).to.be.an('error');
+      expect(error.message).to.equal('key must be a non-empty string or number');
+    });
+
+    it('rejects keys longer than MAX_KEY_LENGTH', () => {
+      const rateLimiterMemory = new RateLimiterMemory({ points: 5, duration: 5 });
+      const longKey = 'x'.repeat(RateLimiterMemory.MAX_KEY_LENGTH + 1);
+      expect(() => rateLimiterMemory.getKey(longKey))
+        .to.throw(`key length must not exceed ${RateLimiterMemory.MAX_KEY_LENGTH} characters`);
+    });
+  });
 });

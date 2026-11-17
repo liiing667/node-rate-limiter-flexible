@@ -140,6 +140,13 @@ export class RateLimiterAbstract {
     parseKey(rlKey: string): string;
 
     /**
+     * Maximum accepted length of an application key (before prefixing/encoding).
+     */
+    readonly MAX_KEY_LENGTH: number;
+
+    static readonly MAX_KEY_LENGTH: number;
+
+    /**
      * @param key is usually IP address or some unique client id
      * @param pointsToConsume number of points consumed. default: 1
      * @param options is object with additional settings:

@@ -179,7 +179,16 @@ See [releases](https://github.com/animir/node-rate-limiter-flexible/releases) fo
     Must be pool or connection created with store client packages, e.g. `@valkey/valkey-glide`, `ioredis`, `iovalkey`, `redis`,  `memcached`, `mongodb`, `pg`, `mysql2`, `mysql`, etc.
 
 ### Other options on Wiki:
-* [keyPrefix](https://github.com/animir/node-rate-limiter-flexible/wiki/Options#keyprefix) Make keys unique among different limiters.
+* [keyPrefix](https://github.com/animir/node-rate-limiter-flexible/wiki/Options#keyprefix) Make keys unique among different limiters. It must not contain the `:` character.
+
+### Key namespace and limits
+
+Storage keys are built as `keyPrefix:key` and the mapping is collision-free and reversible:
+
+* Keys without a `:` keep the legacy `keyPrefix:key` layout, so data written by previous versions stays readable.
+* Keys containing `:` are base64-encoded behind a `b64` marker (e.g. `rlflx:b64:<base64>`), which prevents a key such as `otherPrefix:victim` from colliding with another limiter's record.
+* `getKey`/`parseKey` remain exact inverses, and `parseKey` still decodes legacy plain storage keys.
+* Application keys must be a non-empty string or finite number and may not exceed `RateLimiterAbstract.MAX_KEY_LENGTH` (4096) characters; invalid keys reject the operation.
 * [blockDuration](https://github.com/animir/node-rate-limiter-flexible/wiki/Options#blockduration) Block for N seconds, if consumed more than points.
 * [blockOnConsumed](https://github.com/animir/node-rate-limiter-flexible/wiki/Options#blockonconsumed) Block if consumed points exceed a certain threshold.
 * [inMemoryBlockOnConsumed](https://github.com/animir/node-rate-limiter-flexible/wiki/Options#inmemoryblockonconsumed) Avoid extra requests to store.

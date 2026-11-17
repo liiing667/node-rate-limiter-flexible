@@ -348,4 +348,54 @@ describe('RateLimiterStoreAbstract blockOnConsumed', () => {
     expect((await limiter.block('b', 0.5)).msBeforeNext).eq(500);
     expect((await limiter.set('s', 1, 0.5)).msBeforeNext).eq(500);
   });
+
+  describe('quota key namespace', () => {
+    it('isolates limiters whose keys embed the other limiter prefix', async () => {
+      const limiterA = new RateLimiterStoreMemory({ keyPrefix: 'a', points: 10, duration: 1 });
+      const limiterB = new RateLimiterStoreMemory({ keyPrefix: 'b', points: 10, duration: 1 });
+
+      expect(limiterA.getKey('b:victim')).to.not.equal(limiterB.getKey('victim'));
+
+      await limiterA.consume('b:victim', 4);
+      expect(await limiterB.get('victim')).to.equal(null);
+      const attacker = await limiterA.get('b:victim');
+      expect(attacker.consumedPoints).to.equal(4);
+    });
+
+    it('parses encoded rlKey back to the original key', () => {
+      const limiter = new RateLimiterStoreMemory({ points: 10, duration: 1 });
+      const rlKey = limiter.getKey('tenant:user');
+      expect(limiter.parseKey(rlKey)).to.equal('tenant:user');
+    });
+
+    it('rejects empty keys on every mutating operation', async () => {
+      const limiter = new RateLimiterStoreMemory({ points: 10, duration: 1 });
+      const operations = [
+        () => limiter.consume(''),
+        () => limiter.penalty(''),
+        () => limiter.reward(''),
+        () => limiter.block('', 1),
+        () => limiter.set('', 1, 1),
+      ];
+      const results = await Promise.all(operations.map(op => op()
+        .then(() => ({ error: null }))
+        .catch(error => ({ error }))));
+      results.forEach(({ error }) => {
+        expect(error, 'expected operation to reject an empty key').to.be.an('error');
+        expect(error.message).to.equal('key must be a non-empty string or number');
+      });
+    });
+
+    it('enforces the documented maximum key length', () => {
+      const limiter = new RateLimiterStoreMemory({ points: 10, duration: 1 });
+      const longKey = 'k'.repeat(limiter.MAX_KEY_LENGTH + 1);
+      expect(() => limiter.getKey(longKey))
+        .to.throw(`key length must not exceed ${limiter.MAX_KEY_LENGTH} characters`);
+    });
+
+    it('rejects a keyPrefix with the colon delimiter', () => {
+      expect(() => new RateLimiterStoreMemory({ keyPrefix: 'a:b', points: 10, duration: 1 }))
+        .to.throw('keyPrefix must not contain ":" character');
+    });
+  });
 });
