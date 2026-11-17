@@ -292,6 +292,180 @@ describe('RateLimiterMemory with fixed window', function RateLimiterMemoryTest()
       });
   });
 
+  it('reward cannot lift block before blockDuration expires', (done) => {
+    const testKey = 'rewardblocked';
+    const rateLimiterMemory = new RateLimiterMemory({ points: 1, duration: 1, blockDuration: 2 });
+    rateLimiterMemory.consume(testKey, 2)
+      .then(() => {
+        done(Error('must not resolve'));
+      })
+      .catch(() => {
+        rateLimiterMemory.reward(testKey, 2)
+          .then((rewardRes) => {
+            expect(rewardRes.consumedPoints).to.equal(2);
+            expect(rewardRes.remainingPoints).to.equal(0);
+            rateLimiterMemory.consume(testKey)
+              .then(() => {
+                done(Error('must not resolve'));
+              })
+              .catch((rej) => {
+                expect(rej.msBeforeNext > 0).to.equal(true);
+                expect(rej.remainingPoints).to.equal(0);
+                done();
+              });
+          })
+          .catch((err) => {
+            done(err);
+          });
+      });
+  });
+
+  it('penalty cannot change blocked record', (done) => {
+    const testKey = 'penaltyblocked';
+    const rateLimiterMemory = new RateLimiterMemory({ points: 1, duration: 1, blockDuration: 2 });
+    rateLimiterMemory.consume(testKey, 2)
+      .then(() => {
+        done(Error('must not resolve'));
+      })
+      .catch(() => {
+        rateLimiterMemory.penalty(testKey, 3)
+          .then((penaltyRes) => {
+            expect(penaltyRes.consumedPoints).to.equal(2);
+            const res = rateLimiterMemory._memoryStorage.get(rateLimiterMemory.getKey(testKey));
+            expect(res.consumedPoints).to.equal(2);
+            done();
+          })
+          .catch((err) => {
+            done(err);
+          });
+      });
+  });
+
+  it('consume during block rejects without consuming points', (done) => {
+    const testKey = 'consumeblocked';
+    const rateLimiterMemory = new RateLimiterMemory({ points: 1, duration: 1, blockDuration: 2 });
+    rateLimiterMemory.consume(testKey, 2)
+      .then(() => {
+        done(Error('must not resolve'));
+      })
+      .catch((firstRej) => {
+        rateLimiterMemory.consume(testKey)
+          .then(() => {
+            done(Error('must not resolve'));
+          })
+          .catch((secondRej) => {
+            expect(secondRej.consumedPoints).to.equal(firstRej.consumedPoints);
+            expect(secondRej.remainingPoints).to.equal(0);
+            expect(secondRej.msBeforeNext > 0).to.equal(true);
+            done();
+          });
+      });
+  });
+
+  it('reward with customDuration cannot lift block', (done) => {
+    const testKey = 'rewardblockedcustom';
+    const rateLimiterMemory = new RateLimiterMemory({ points: 1, duration: 1, blockDuration: 2 });
+    rateLimiterMemory.consume(testKey, 2, { customDuration: 5 })
+      .then(() => {
+        done(Error('must not resolve'));
+      })
+      .catch(() => {
+        rateLimiterMemory.reward(testKey, 2, { customDuration: 5 })
+          .then((rewardRes) => {
+            expect(rewardRes.consumedPoints).to.equal(2);
+            rateLimiterMemory.consume(testKey, 1, { customDuration: 5 })
+              .then(() => {
+                done(Error('must not resolve'));
+              })
+              .catch((rej) => {
+                expect(rej.remainingPoints).to.equal(0);
+                expect(rej.msBeforeNext > 1000).to.equal(true);
+                done();
+              });
+          })
+          .catch((err) => {
+            done(err);
+          });
+      });
+  });
+
+  it('reward works on over limit key when blockDuration is not set', (done) => {
+    const testKey = 'rewardoverlimit';
+    const rateLimiterMemory = new RateLimiterMemory({ points: 1, duration: 2 });
+    rateLimiterMemory.consume(testKey, 2)
+      .then(() => {
+        done(Error('must not resolve'));
+      })
+      .catch(() => {
+        rateLimiterMemory.reward(testKey, 1)
+          .then((rewardRes) => {
+            expect(rewardRes.consumedPoints).to.equal(1);
+            rateLimiterMemory.consume(testKey)
+              .then(() => {
+                done(Error('must not resolve'));
+              })
+              .catch((rej) => {
+                expect(rej.consumedPoints).to.equal(2);
+                done();
+              });
+          })
+          .catch((err) => {
+            done(err);
+          });
+      });
+  });
+
+  it('reward cannot lift block set by block()', (done) => {
+    const testKey = 'rewardmanualblock';
+    const rateLimiterMemory = new RateLimiterMemory({ points: 1, duration: 1 });
+    rateLimiterMemory.block(testKey, 2)
+      .then(() => {
+        rateLimiterMemory.reward(testKey, 2)
+          .then((rewardRes) => {
+            expect(rewardRes.consumedPoints).to.equal(2);
+            rateLimiterMemory.consume(testKey)
+              .then(() => {
+                done(Error('must not resolve'));
+              })
+              .catch((rej) => {
+                expect(rej.remainingPoints).to.equal(0);
+                done();
+              });
+          })
+          .catch((err) => {
+            done(err);
+          });
+      })
+      .catch((err) => {
+        done(err);
+      });
+  });
+
+  it('delete removes blocked state', (done) => {
+    const testKey = 'deleteblocked';
+    const rateLimiterMemory = new RateLimiterMemory({ points: 1, duration: 1, blockDuration: 5 });
+    rateLimiterMemory.consume(testKey, 2)
+      .then(() => {
+        done(Error('must not resolve'));
+      })
+      .catch(() => {
+        rateLimiterMemory.delete(testKey)
+          .then(() => {
+            rateLimiterMemory.consume(testKey)
+              .then((res) => {
+                expect(res.consumedPoints).to.equal(1);
+                done();
+              })
+              .catch(() => {
+                done(Error('must resolve'));
+              });
+          })
+          .catch((err) => {
+            done(err);
+          });
+      });
+  });
+
   it('get by key', (done) => {
     const testKey = 'get';
     const rateLimiterMemory = new RateLimiterMemory({ points: 2, duration: 5 });
